@@ -1,0 +1,17 @@
+# Python virtual environments
+venv/
+.venv/
+
+# Python generated files
+__pycache__/
+*.pyc
+
+# Private API keys and configuration
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Local tool caches
+.pytest_cache/
+.ruff_cache/
