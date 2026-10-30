@@ -10,6 +10,7 @@ from reviewer.ai_reviewer import (
     report_to_markdown,
     review_code_structured,
 )
+from reviewer.security_analyzer import analyze_with_bandit
 from reviewer.static_analyzer import analyze_with_ruff
 from reviewer.syntax_checker import check_syntax
 
@@ -158,26 +159,13 @@ except Exception:
 
 
 # --------------------------------------------------
-# SESSION STATE
+# HELPERS
 # --------------------------------------------------
-STATE_DEFAULTS = {
-    "checks_identity": None,
-    "checks_report": None,
-    "checks_syntax": None,
-    "checks_ruff": None,
-    "checks_ruff_error": None,
-    "checks_ai_error": None,
-    "checks_seconds": None,
-    "checks_timestamp": None,
-}
-
-for key, value in STATE_DEFAULTS.items():
-    if key not in st.session_state:
-        st.session_state[key] = value
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def safe_error(error: Exception) -> str:
-    """Prepare diagnostic text without displaying the API key."""
     details = f"{type(error).__name__}: {error}"
 
     if api_key:
@@ -186,20 +174,100 @@ def safe_error(error: Exception) -> str:
     return details
 
 
-def run_local_checks(source_code: str) -> None:
-    """Run syntax and Ruff checks independently of Gemini."""
-    st.session_state.checks_syntax = check_syntax(source_code)
-    st.session_state.checks_ruff = None
-    st.session_state.checks_ruff_error = None
+def new_review_state() -> dict:
+    return {
+        "syntax": None,
+        "tools": {},
+        "local_checked_at": None,
+        "ai_report": None,
+        "ai_error": None,
+        "ai_requested_at": None,
+        "ai_completed_at": None,
+        "ai_seconds": None,
+    }
 
-    if st.session_state.checks_syntax["valid"]:
+
+def run_local_checks(source_code: str, state: dict) -> None:
+    """Run each local analyzer separately and preserve its status."""
+    state["syntax"] = check_syntax(source_code)
+    state["tools"] = {}
+
+    analyzers = {
+        "Ruff": analyze_with_ruff,
+        "Bandit": analyze_with_bandit,
+    }
+
+    for name, analyzer in analyzers.items():
+        if not state["syntax"]["valid"]:
+            state["tools"][name] = {
+                "status": "skipped",
+                "findings": None,
+                "error": None,
+            }
+            continue
+
         try:
-            st.session_state.checks_ruff = analyze_with_ruff(
-                source_code
-            )
+            findings = analyzer(source_code)
+
+            state["tools"][name] = {
+                "status": "completed",
+                "findings": findings,
+                "error": None,
+            }
 
         except Exception as error:
-            st.session_state.checks_ruff_error = safe_error(error)
+            state["tools"][name] = {
+                "status": "failed",
+                "findings": None,
+                "error": safe_error(error),
+            }
+
+    state["local_checked_at"] = utc_now()
+
+
+def display_local_tool(name: str, result: dict) -> None:
+    """Display a completed, failed, or skipped analyzer result."""
+    st.markdown(f"**{name} analysis**")
+
+    if result["status"] == "skipped":
+        st.caption("Skipped because syntax checking did not pass.")
+        return
+
+    if result["status"] == "failed":
+        st.error(f"{name} could not complete its analysis.")
+
+        with st.expander(f"{name} error details"):
+            st.code(result["error"], language="text")
+
+        return
+
+    findings = result["findings"]
+    st.caption(f"Source: {name} · {len(findings)} findings")
+
+    if not findings:
+        st.info(
+            f"No findings from the configured {name} checks. "
+            "This does not guarantee correctness or security."
+        )
+
+    for finding in findings:
+        heading = f"{finding['rule_id']} · {finding['message']}"
+
+        with st.expander(heading, expanded=True):
+            st.caption(
+                f"Source: {name} · "
+                f"Lines {finding['line_start']}"
+                f"–{finding['line_end']}"
+            )
+
+            if name == "Bandit":
+                st.write(
+                    f"**Severity:** {finding['severity']} · "
+                    f"**Confidence:** {finding['confidence']}"
+                )
+
+            st.code(finding["evidence"], language="python")
+            st.caption("Rule-based finding requiring review.")
 
 
 # --------------------------------------------------
@@ -232,16 +300,16 @@ with st.sidebar:
     else:
         st.warning("API key missing")
 
-    st.caption("Local checks work without an API key.")
+    st.caption("Ruff and Bandit work without an API key.")
 
     st.divider()
-    st.subheader("How to use")
+    st.subheader("Review engines")
     st.markdown(
         """
-        1. Paste code or upload a Python file.
-        2. Run local checks for syntax and Ruff findings.
-        3. Request an AI review for additional analysis.
-        4. Inspect findings and download your report.
+        - **Python:** syntax checking
+        - **Ruff:** code error and quality checks
+        - **Bandit:** potential security issues
+        - **Gemini:** AI-assisted analysis
         """
     )
 
@@ -261,8 +329,8 @@ st.markdown(
         <div class="hero-tag">YOUR CODE REVIEW WORKSPACE</div>
         <div class="hero-title">A clearer view of your code.</div>
         <div class="hero-description">
-            Combine local Python checks with AI-assisted analysis.
-            See each finding's source and inspect proposed improvements.
+            Inspect Python code using local quality checks,
+            security analysis, and AI-generated explanations.
         </div>
     </div>
     """,
@@ -271,7 +339,7 @@ st.markdown(
 
 
 # --------------------------------------------------
-# SOURCE PANEL
+# INPUT PANEL
 # --------------------------------------------------
 input_column, review_column = st.columns(
     [1, 1.15],
@@ -300,7 +368,7 @@ with input_column:
                     "    return sum(numbers) / len(numbers)\n"
                 ),
                 height=380,
-                key="checks_editor",
+                key="security_workspace_editor",
             )
 
             if len(source_code.encode("utf-8")) > 200_000:
@@ -354,11 +422,11 @@ with input_column:
             input_ready,
         )
 
-        if st.session_state.checks_identity != identity:
-            for key, value in STATE_DEFAULTS.items():
-                st.session_state[key] = value
+        if st.session_state.get("security_identity") != identity:
+            st.session_state.security_identity = identity
+            st.session_state.security_review = new_review_state()
 
-            st.session_state.checks_identity = identity
+        state = st.session_state.security_review
 
         local_column, ai_column = st.columns(2)
 
@@ -384,30 +452,28 @@ with input_column:
 
         st.caption(
             "Local checks make no API requests. "
-            "Submitted code is not executed."
+            "Submitted code is inspected, not executed."
         )
 
 
 # --------------------------------------------------
-# ACTIONS
+# RUN ANALYSIS
 # --------------------------------------------------
 if local_clicked:
-    run_local_checks(source_code)
-    st.session_state.checks_timestamp = datetime.now(
-        timezone.utc
-    ).isoformat(timespec="seconds")
+    run_local_checks(source_code, state)
 
 if ai_clicked:
-    st.session_state.checks_report = None
-    st.session_state.checks_ai_error = None
-    st.session_state.checks_seconds = None
+    state["ai_report"] = None
+    state["ai_error"] = None
+    state["ai_requested_at"] = None
+    state["ai_completed_at"] = None
+    state["ai_seconds"] = None
 
-    run_local_checks(source_code)
-    st.session_state.checks_timestamp = datetime.now(
-        timezone.utc
-    ).isoformat(timespec="seconds")
+    run_local_checks(source_code, state)
 
-    if st.session_state.checks_syntax["valid"]:
+    if state["syntax"]["valid"]:
+        state["ai_requested_at"] = utc_now()
+
         try:
             started_at = time.perf_counter()
 
@@ -419,24 +485,21 @@ if ai_clicked:
                         model=model_name,
                     )
 
-            st.session_state.checks_report = (
-                generated_report.model_dump()
-            )
-            st.session_state.checks_seconds = round(
+            state["ai_report"] = generated_report.model_dump()
+            state["ai_seconds"] = round(
                 time.perf_counter() - started_at,
                 1,
             )
+            state["ai_completed_at"] = utc_now()
 
         except Exception as error:
-            st.session_state.checks_ai_error = safe_error(error)
+            state["ai_error"] = safe_error(error)
 
 
 report = None
 
-if st.session_state.checks_report is not None:
-    report = ReviewReport.model_validate(
-        st.session_state.checks_report
-    )
+if state["ai_report"] is not None:
+    report = ReviewReport.model_validate(state["ai_report"])
 
 
 # --------------------------------------------------
@@ -450,123 +513,64 @@ with review_column:
             ["Local checks", "AI findings", "Export"]
         )
 
-        # ------------------------------------------
-        # LOCAL RESULTS
-        # ------------------------------------------
         with local_tab:
-            syntax_result = st.session_state.checks_syntax
-
-            if syntax_result is None:
-                st.info("Select Run local checks to begin.")
+            if state["syntax"] is None:
+                st.info(
+                    "Select Run local checks to run "
+                    "Python syntax, Ruff, and Bandit checks."
+                )
 
             else:
                 st.markdown("**Python syntax**")
 
-                if syntax_result["valid"]:
+                if state["syntax"]["valid"]:
                     st.success("No Python syntax errors found.")
 
                 else:
-                    st.error(syntax_result["message"])
+                    st.error(state["syntax"]["message"])
 
-                    if syntax_result["line"] is not None:
+                    if state["syntax"]["line"] is not None:
                         st.write(
-                            f"Line: {syntax_result['line']} · "
-                            f"Column: {syntax_result['column']}"
+                            f"Line: {state['syntax']['line']} · "
+                            f"Column: {state['syntax']['column']}"
                         )
 
-                st.divider()
-                st.markdown("**Ruff analysis**")
+                for tool_name, tool_result in state["tools"].items():
+                    st.divider()
+                    display_local_tool(tool_name, tool_result)
 
-                if st.session_state.checks_ruff_error:
-                    st.error("Ruff could not complete its analysis.")
-
-                    with st.expander("Ruff error details"):
-                        st.code(
-                            st.session_state.checks_ruff_error,
-                            language="text",
-                        )
-
-                elif st.session_state.checks_ruff is not None:
-                    findings = st.session_state.checks_ruff
-                    st.caption(
-                        f"{len(findings)} findings · Rules: E9, F"
-                    )
-
-                    if not findings:
-                        st.info(
-                            "No findings from the selected Ruff rules. "
-                            "This does not verify all program behavior."
-                        )
-
-                    for index, finding in enumerate(findings, 1):
-                        heading = (
-                            f"{finding['rule_id']} · "
-                            f"{finding['message']}"
-                        )
-
-                        with st.expander(heading, expanded=True):
-                            st.caption(
-                                f"Source: Ruff · "
-                                f"Line {finding['line_start']} · "
-                                f"Column {finding['column']}"
-                            )
-                            st.code(
-                                finding["evidence"],
-                                language="python",
-                            )
-                            st.caption(
-                                "A rule-based finding requiring review."
-                            )
-
-                else:
-                    st.caption(
-                        "Ruff was skipped because syntax checking "
-                        "did not pass."
-                    )
-
-        # ------------------------------------------
-        # AI RESULTS
-        # ------------------------------------------
         with ai_tab:
-            if st.session_state.checks_ai_error:
+            if state["ai_error"]:
                 st.error("The AI review could not be completed.")
 
                 with st.expander("Error details", expanded=True):
-                    st.code(
-                        st.session_state.checks_ai_error,
-                        language="text",
-                    )
+                    st.code(state["ai_error"], language="text")
 
             elif report is not None:
                 st.write(report.summary)
                 st.caption(
                     f"Model requested: {model_name} · "
-                    f"{st.session_state.checks_seconds} seconds"
+                    f"{state['ai_seconds']} seconds"
                 )
 
-                counts = {
-                    severity: sum(
+                metric_columns = st.columns(3)
+
+                for column, severity in zip(
+                    metric_columns,
+                    ["High", "Medium", "Low"],
+                ):
+                    count = sum(
                         finding.severity == severity
                         for finding in report.findings
                     )
-                    for severity in ["High", "Medium", "Low"]
-                }
-
-                high_col, medium_col, low_col = st.columns(3)
-                high_col.metric("High", counts["High"])
-                medium_col.metric("Medium", counts["Medium"])
-                low_col.metric("Low", counts["Low"])
+                    column.metric(severity, count)
 
                 st.caption(
-                    "AI severity labels are judgments, "
-                    "not verified ratings."
+                    "AI labels are judgments, not verified defects."
                 )
 
                 if not report.findings:
-                    st.info(
-                        "No significant AI findings were reported. "
-                        "This does not guarantee correctness."
-                    )
+                    st.info("No significant AI findings reported.")
 
                 else:
                     severity_col, category_col = st.columns(2)
@@ -631,7 +635,6 @@ with review_column:
                         "Medium": "🟠",
                         "Low": "🔵",
                     }
-
                     source_lines = source_code.splitlines()
 
                     for index, finding in visible:
@@ -678,15 +681,12 @@ with review_column:
 
             else:
                 st.info(
-                    "Select Review with AI to request "
-                    "additional analysis."
+                    "Select Review with AI for additional analysis. "
+                    "Resolve syntax errors first."
                 )
 
-        # ------------------------------------------
-        # EXPORT
-        # ------------------------------------------
         with export_tab:
-            if st.session_state.checks_syntax is None:
+            if state["syntax"] is None:
                 st.info("Run local checks or an AI review first.")
 
             else:
@@ -694,86 +694,83 @@ with review_column:
                     "metadata": {
                         "file": file_name,
                         "source_sha256": source_hash,
+                        "local_checked_at_utc": (
+                            state["local_checked_at"]
+                        ),
                         "model_requested": (
                             model_name
-                            if (
-                                report is not None
-                                or st.session_state.checks_ai_error
-                            )
+                            if state["ai_requested_at"]
                             else None
                         ),
-                        "latest_check_at_utc": (
-                            st.session_state.checks_timestamp
+                        "ai_requested_at_utc": (
+                            state["ai_requested_at"]
                         ),
-                        "ai_response_seconds": (
-                            st.session_state.checks_seconds
+                        "ai_completed_at_utc": (
+                            state["ai_completed_at"]
                         ),
+                        "ai_response_seconds": state["ai_seconds"],
                     },
-                    "syntax": st.session_state.checks_syntax,
-                    "ruff": {
-                        "findings": st.session_state.checks_ruff,
-                        "error": st.session_state.checks_ruff_error,
-                    },
+                    "syntax": state["syntax"],
+                    "local_tools": state["tools"],
                     "ai": {
-                        "review": (
-                            report.model_dump()
-                            if report is not None
-                            else None
-                        ),
-                        "error": st.session_state.checks_ai_error,
+                        "review": state["ai_report"],
+                        "error": state["ai_error"],
                     },
                 }
 
                 sections = [
                     "# CodeLens — Code Review",
                     f"File: {file_name}",
-                    "## Local check results",
-                    (
-                        "Syntax: "
-                        f"{st.session_state.checks_syntax['message']}"
-                    ),
+                    "## Python syntax",
+                    state["syntax"]["message"],
                 ]
 
-                if st.session_state.checks_ruff_error:
-                    sections.append(
-                        "Ruff analysis failed. See JSON diagnostics."
-                    )
+                for name, result in state["tools"].items():
+                    sections.append(f"## {name} analysis")
 
-                elif st.session_state.checks_ruff is not None:
-                    ruff_findings = st.session_state.checks_ruff
-                    sections.append(
-                        f"### Ruff: {len(ruff_findings)} findings"
-                    )
-
-                    for finding in ruff_findings:
+                    if result["status"] != "completed":
                         sections.append(
+                            f"Status: {result['status']}. "
+                            "See JSON export for diagnostics."
+                        )
+                        continue
+
+                    sections.append(
+                        f"{len(result['findings'])} findings."
+                    )
+
+                    for finding in result["findings"]:
+                        details = (
                             f"- {finding['rule_id']} · "
                             f"Line {finding['line_start']}: "
                             f"{finding['message']}"
                         )
 
-                else:
-                    sections.append("Ruff analysis was skipped.")
+                        if name == "Bandit":
+                            details += (
+                                f" Severity: {finding['severity']}. "
+                                f"Confidence: {finding['confidence']}."
+                            )
+
+                        sections.append(details)
+
+                sections.append("## AI review")
 
                 if report is not None:
                     sections.extend(
                         [
-                            "## AI review",
                             f"Model requested: {model_name}",
                             report_to_markdown(report, source_code),
                         ]
                     )
 
-                elif st.session_state.checks_ai_error:
+                elif state["ai_error"]:
                     sections.append(
-                        "## AI review\n\n"
-                        "The AI review failed. See JSON diagnostics."
+                        "Failed. See JSON export for diagnostics."
                     )
 
                 else:
-                    sections.append(
-                        "## AI review\n\nNot requested."
-                    )
+                    sections.append("Not requested.")
 
                 sections.append(
                     "Findings require human review. "
@@ -782,7 +779,7 @@ with review_column:
 
                 st.caption(
                     "Exports include all findings, "
-                    "regardless of active filters."
+                    "regardless of selected filters."
                 )
 
                 st.download_button(
@@ -810,5 +807,5 @@ st.divider()
 st.caption(
     f"Source: {file_name} · "
     f"{len(source_code.splitlines())} lines · "
-    "Local rules and AI analysis provide complementary findings."
+    "Python syntax + Ruff + Bandit + optional Gemini review."
 )

@@ -2,3 +2,4 @@ streamlit
 google-genai
 pydantic>=2,<3
 ruff
+bandit
