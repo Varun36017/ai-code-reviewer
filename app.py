@@ -10,6 +10,7 @@ from reviewer.ai_reviewer import (
     report_to_markdown,
     review_code_structured,
 )
+from reviewer.static_analyzer import analyze_with_ruff
 from reviewer.syntax_checker import check_syntax
 
 
@@ -136,7 +137,7 @@ st.markdown(
 
 
 # --------------------------------------------------
-# SAVED API KEY
+# API CONFIGURATION
 # --------------------------------------------------
 api_key = ""
 configuration_error = False
@@ -158,20 +159,47 @@ except Exception:
 
 # --------------------------------------------------
 # SESSION STATE
-# New names avoid mixing old Markdown with structured data.
 # --------------------------------------------------
 STATE_DEFAULTS = {
-    "cards_identity": None,
-    "cards_report": None,
-    "cards_syntax": None,
-    "cards_error": None,
-    "cards_seconds": None,
-    "cards_timestamp": None,
+    "checks_identity": None,
+    "checks_report": None,
+    "checks_syntax": None,
+    "checks_ruff": None,
+    "checks_ruff_error": None,
+    "checks_ai_error": None,
+    "checks_seconds": None,
+    "checks_timestamp": None,
 }
 
 for key, value in STATE_DEFAULTS.items():
     if key not in st.session_state:
         st.session_state[key] = value
+
+
+def safe_error(error: Exception) -> str:
+    """Prepare diagnostic text without displaying the API key."""
+    details = f"{type(error).__name__}: {error}"
+
+    if api_key:
+        details = details.replace(api_key, "[API KEY HIDDEN]")
+
+    return details
+
+
+def run_local_checks(source_code: str) -> None:
+    """Run syntax and Ruff checks independently of Gemini."""
+    st.session_state.checks_syntax = check_syntax(source_code)
+    st.session_state.checks_ruff = None
+    st.session_state.checks_ruff_error = None
+
+    if st.session_state.checks_syntax["valid"]:
+        try:
+            st.session_state.checks_ruff = analyze_with_ruff(
+                source_code
+            )
+
+        except Exception as error:
+            st.session_state.checks_ruff_error = safe_error(error)
 
 
 # --------------------------------------------------
@@ -201,19 +229,19 @@ with st.sidebar:
         st.error("Check the format of your secrets file.")
     elif api_key:
         st.success("Saved API key loaded")
-        st.caption("A review request verifies model access.")
     else:
         st.warning("API key missing")
-        st.caption("Configure .streamlit/secrets.toml.")
+
+    st.caption("Local checks work without an API key.")
 
     st.divider()
     st.subheader("How to use")
     st.markdown(
         """
         1. Paste code or upload a Python file.
-        2. Check syntax or request an AI review.
-        3. Filter findings and inspect proposed fixes.
-        4. Download the complete report.
+        2. Run local checks for syntax and Ruff findings.
+        3. Request an AI review for additional analysis.
+        4. Inspect findings and download your report.
         """
     )
 
@@ -233,8 +261,8 @@ st.markdown(
         <div class="hero-tag">YOUR CODE REVIEW WORKSPACE</div>
         <div class="hero-title">A clearer view of your code.</div>
         <div class="hero-description">
-            Inspect findings, understand their impact,
-            and explore proposed improvements.
+            Combine local Python checks with AI-assisted analysis.
+            See each finding's source and inspect proposed improvements.
         </div>
     </div>
     """,
@@ -243,7 +271,7 @@ st.markdown(
 
 
 # --------------------------------------------------
-# INPUT PANEL
+# SOURCE PANEL
 # --------------------------------------------------
 input_column, review_column = st.columns(
     [1, 1.15],
@@ -272,7 +300,7 @@ with input_column:
                     "    return sum(numbers) / len(numbers)\n"
                 ),
                 height=380,
-                key="cards_editor",
+                key="checks_editor",
             )
 
             if len(source_code.encode("utf-8")) > 200_000:
@@ -318,7 +346,7 @@ with input_column:
             source_code.encode("utf-8")
         ).hexdigest()
 
-        current_identity = (
+        identity = (
             input_method,
             file_name,
             source_hash,
@@ -326,23 +354,23 @@ with input_column:
             input_ready,
         )
 
-        if st.session_state.cards_identity != current_identity:
+        if st.session_state.checks_identity != identity:
             for key, value in STATE_DEFAULTS.items():
                 st.session_state[key] = value
 
-            st.session_state.cards_identity = current_identity
+            st.session_state.checks_identity = identity
 
-        syntax_column, ai_column = st.columns(2)
+        local_column, ai_column = st.columns(2)
 
-        with syntax_column:
-            syntax_clicked = st.button(
-                "Check syntax",
+        with local_column:
+            local_clicked = st.button(
+                "Run local checks",
                 disabled=not input_ready,
                 use_container_width=True,
             )
 
         with ai_column:
-            review_clicked = st.button(
+            ai_clicked = st.button(
                 "Review with AI",
                 type="primary",
                 disabled=(
@@ -355,68 +383,59 @@ with input_column:
             )
 
         st.caption(
-            "Syntax checks run locally. "
-            "Submitted code is not executed by this app."
+            "Local checks make no API requests. "
+            "Submitted code is not executed."
         )
 
 
 # --------------------------------------------------
-# HANDLE ACTIONS
+# ACTIONS
 # --------------------------------------------------
-if syntax_clicked:
-    st.session_state.cards_syntax = check_syntax(source_code)
+if local_clicked:
+    run_local_checks(source_code)
+    st.session_state.checks_timestamp = datetime.now(
+        timezone.utc
+    ).isoformat(timespec="seconds")
 
-if review_clicked:
-    st.session_state.cards_report = None
-    st.session_state.cards_error = None
-    st.session_state.cards_seconds = None
-    st.session_state.cards_timestamp = None
+if ai_clicked:
+    st.session_state.checks_report = None
+    st.session_state.checks_ai_error = None
+    st.session_state.checks_seconds = None
 
-    syntax_result = check_syntax(source_code)
-    st.session_state.cards_syntax = syntax_result
+    run_local_checks(source_code)
+    st.session_state.checks_timestamp = datetime.now(
+        timezone.utc
+    ).isoformat(timespec="seconds")
 
-    if syntax_result["valid"]:
+    if st.session_state.checks_syntax["valid"]:
         try:
             started_at = time.perf_counter()
 
             with review_column:
-                with st.spinner("Reviewing your Python code..."):
-                    report = review_code_structured(
+                with st.spinner("Gemini is reviewing your code..."):
+                    generated_report = review_code_structured(
                         source_code=source_code,
                         api_key=api_key,
                         model=model_name,
                     )
 
-            # Store plain data rather than a class instance.
-            st.session_state.cards_report = report.model_dump()
-            st.session_state.cards_seconds = round(
+            st.session_state.checks_report = (
+                generated_report.model_dump()
+            )
+            st.session_state.checks_seconds = round(
                 time.perf_counter() - started_at,
                 1,
             )
-            st.session_state.cards_timestamp = datetime.now(
-                timezone.utc
-            ).isoformat(timespec="seconds")
 
         except Exception as error:
-            details = f"{type(error).__name__}: {error}"
-
-            if api_key:
-                details = details.replace(
-                    api_key,
-                    "[API KEY HIDDEN]",
-                )
-
-            st.session_state.cards_error = details
+            st.session_state.checks_ai_error = safe_error(error)
 
 
-# --------------------------------------------------
-# LOAD THE CURRENT REPORT
-# --------------------------------------------------
 report = None
 
-if st.session_state.cards_report is not None:
+if st.session_state.checks_report is not None:
     report = ReviewReport.model_validate(
-        st.session_state.cards_report
+        st.session_state.checks_report
     )
 
 
@@ -427,17 +446,94 @@ with review_column:
     with st.container(border=True):
         st.subheader("02 · Review results")
 
-        findings_tab, syntax_tab, export_tab = st.tabs(
-            ["AI findings", "Syntax check", "Export report"]
+        local_tab, ai_tab, export_tab = st.tabs(
+            ["Local checks", "AI findings", "Export"]
         )
 
-        with findings_tab:
-            if st.session_state.cards_error:
+        # ------------------------------------------
+        # LOCAL RESULTS
+        # ------------------------------------------
+        with local_tab:
+            syntax_result = st.session_state.checks_syntax
+
+            if syntax_result is None:
+                st.info("Select Run local checks to begin.")
+
+            else:
+                st.markdown("**Python syntax**")
+
+                if syntax_result["valid"]:
+                    st.success("No Python syntax errors found.")
+
+                else:
+                    st.error(syntax_result["message"])
+
+                    if syntax_result["line"] is not None:
+                        st.write(
+                            f"Line: {syntax_result['line']} · "
+                            f"Column: {syntax_result['column']}"
+                        )
+
+                st.divider()
+                st.markdown("**Ruff analysis**")
+
+                if st.session_state.checks_ruff_error:
+                    st.error("Ruff could not complete its analysis.")
+
+                    with st.expander("Ruff error details"):
+                        st.code(
+                            st.session_state.checks_ruff_error,
+                            language="text",
+                        )
+
+                elif st.session_state.checks_ruff is not None:
+                    findings = st.session_state.checks_ruff
+                    st.caption(
+                        f"{len(findings)} findings · Rules: E9, F"
+                    )
+
+                    if not findings:
+                        st.info(
+                            "No findings from the selected Ruff rules. "
+                            "This does not verify all program behavior."
+                        )
+
+                    for index, finding in enumerate(findings, 1):
+                        heading = (
+                            f"{finding['rule_id']} · "
+                            f"{finding['message']}"
+                        )
+
+                        with st.expander(heading, expanded=True):
+                            st.caption(
+                                f"Source: Ruff · "
+                                f"Line {finding['line_start']} · "
+                                f"Column {finding['column']}"
+                            )
+                            st.code(
+                                finding["evidence"],
+                                language="python",
+                            )
+                            st.caption(
+                                "A rule-based finding requiring review."
+                            )
+
+                else:
+                    st.caption(
+                        "Ruff was skipped because syntax checking "
+                        "did not pass."
+                    )
+
+        # ------------------------------------------
+        # AI RESULTS
+        # ------------------------------------------
+        with ai_tab:
+            if st.session_state.checks_ai_error:
                 st.error("The AI review could not be completed.")
 
                 with st.expander("Error details", expanded=True):
                     st.code(
-                        st.session_state.cards_error,
+                        st.session_state.checks_ai_error,
                         language="text",
                     )
 
@@ -445,7 +541,7 @@ with review_column:
                 st.write(report.summary)
                 st.caption(
                     f"Model requested: {model_name} · "
-                    f"{st.session_state.cards_seconds} seconds"
+                    f"{st.session_state.checks_seconds} seconds"
                 )
 
                 counts = {
@@ -457,20 +553,19 @@ with review_column:
                 }
 
                 high_col, medium_col, low_col = st.columns(3)
-
                 high_col.metric("High", counts["High"])
                 medium_col.metric("Medium", counts["Medium"])
                 low_col.metric("Low", counts["Low"])
 
                 st.caption(
-                    "Counts and labels reflect AI judgments, "
-                    "not verified defects."
+                    "AI severity labels are judgments, "
+                    "not verified ratings."
                 )
 
                 if not report.findings:
                     st.info(
-                        "No significant findings were reported. "
-                        "This does not guarantee correct or secure code."
+                        "No significant AI findings were reported. "
+                        "This does not guarantee correctness."
                     )
 
                 else:
@@ -504,11 +599,10 @@ with review_column:
                         ],
                     )
 
-                    visible_findings = [
+                    visible = [
                         (index, finding)
                         for index, finding in enumerate(
-                            report.findings,
-                            start=1,
+                            report.findings, 1
                         )
                         if (
                             severity_filter == "All"
@@ -525,14 +619,14 @@ with review_column:
                     ]
 
                     st.caption(
-                        f"Showing {len(visible_findings)} of "
+                        f"Showing {len(visible)} of "
                         f"{len(report.findings)} findings."
                     )
 
-                    if not visible_findings:
+                    if not visible:
                         st.info("No findings match these filters.")
 
-                    severity_icons = {
+                    icons = {
                         "High": "🔴",
                         "Medium": "🟠",
                         "Low": "🔵",
@@ -540,16 +634,16 @@ with review_column:
 
                     source_lines = source_code.splitlines()
 
-                    for index, finding in visible_findings:
-                        icon = severity_icons[finding.severity]
-
+                    for index, finding in visible:
                         heading = (
-                            f"{icon} {finding.severity} · "
+                            f"{icons[finding.severity]} "
+                            f"{finding.severity} · "
                             f"{index}. {finding.title}"
                         )
 
                         with st.expander(heading, expanded=True):
                             st.caption(
+                                f"Source: Gemini · "
                                 f"{finding.category} · "
                                 f"{finding.finding_type} · "
                                 f"Lines {finding.line_start}"
@@ -573,7 +667,6 @@ with review_column:
                             st.write(finding.suggested_fix)
 
                             if finding.corrected_code.strip():
-                                st.markdown("**Proposed code**")
                                 st.code(
                                     finding.corrected_code,
                                     language="python",
@@ -583,87 +676,118 @@ with review_column:
                                     "Not executed or verified."
                                 )
 
-            elif (
-                st.session_state.cards_syntax is not None
-                and not st.session_state.cards_syntax["valid"]
-            ):
-                st.warning(
-                    "Fix the syntax issue before requesting "
-                    "an AI review. Open Syntax check for details."
-                )
-
             else:
                 st.info(
-                    "Your findings will appear here after you "
-                    "select Review with AI."
+                    "Select Review with AI to request "
+                    "additional analysis."
                 )
 
-        with syntax_tab:
-            result = st.session_state.cards_syntax
-
-            if result is None:
-                st.info("Select Check syntax to inspect your code.")
-
-            elif result["valid"]:
-                st.success(result["message"])
-                st.caption(
-                    "Parsing succeeded. Runtime behavior and "
-                    "security have not been verified."
-                )
-
-            else:
-                st.error(result["message"])
-
-                if result["line"] is not None:
-                    st.write(
-                        f"**Line:** {result['line']} · "
-                        f"**Column:** {result['column']}"
-                    )
-
+        # ------------------------------------------
+        # EXPORT
+        # ------------------------------------------
         with export_tab:
-            if report is None:
-                st.info("Complete an AI review to enable export.")
+            if st.session_state.checks_syntax is None:
+                st.info("Run local checks or an AI review first.")
 
             else:
-                metadata = {
-                    "file": file_name,
-                    "source_sha256": source_hash,
-                    "model_requested": model_name,
-                    "generated_at_utc": (
-                        st.session_state.cards_timestamp
-                    ),
-                    "response_seconds": (
-                        st.session_state.cards_seconds
-                    ),
+                payload = {
+                    "metadata": {
+                        "file": file_name,
+                        "source_sha256": source_hash,
+                        "model_requested": (
+                            model_name
+                            if (
+                                report is not None
+                                or st.session_state.checks_ai_error
+                            )
+                            else None
+                        ),
+                        "latest_check_at_utc": (
+                            st.session_state.checks_timestamp
+                        ),
+                        "ai_response_seconds": (
+                            st.session_state.checks_seconds
+                        ),
+                    },
+                    "syntax": st.session_state.checks_syntax,
+                    "ruff": {
+                        "findings": st.session_state.checks_ruff,
+                        "error": st.session_state.checks_ruff_error,
+                    },
+                    "ai": {
+                        "review": (
+                            report.model_dump()
+                            if report is not None
+                            else None
+                        ),
+                        "error": st.session_state.checks_ai_error,
+                    },
                 }
 
-                markdown_report = (
-                    "# CodeLens — AI Code Review\n\n"
-                    f"- File: {file_name}\n"
-                    f"- Model requested: {model_name}\n"
-                    f"- Generated at (UTC): "
-                    f"{metadata['generated_at_utc']}\n\n"
-                    "---\n\n"
-                    f"{report_to_markdown(report, source_code)}"
+                sections = [
+                    "# CodeLens — Code Review",
+                    f"File: {file_name}",
+                    "## Local check results",
+                    (
+                        "Syntax: "
+                        f"{st.session_state.checks_syntax['message']}"
+                    ),
+                ]
+
+                if st.session_state.checks_ruff_error:
+                    sections.append(
+                        "Ruff analysis failed. See JSON diagnostics."
+                    )
+
+                elif st.session_state.checks_ruff is not None:
+                    ruff_findings = st.session_state.checks_ruff
+                    sections.append(
+                        f"### Ruff: {len(ruff_findings)} findings"
+                    )
+
+                    for finding in ruff_findings:
+                        sections.append(
+                            f"- {finding['rule_id']} · "
+                            f"Line {finding['line_start']}: "
+                            f"{finding['message']}"
+                        )
+
+                else:
+                    sections.append("Ruff analysis was skipped.")
+
+                if report is not None:
+                    sections.extend(
+                        [
+                            "## AI review",
+                            f"Model requested: {model_name}",
+                            report_to_markdown(report, source_code),
+                        ]
+                    )
+
+                elif st.session_state.checks_ai_error:
+                    sections.append(
+                        "## AI review\n\n"
+                        "The AI review failed. See JSON diagnostics."
+                    )
+
+                else:
+                    sections.append(
+                        "## AI review\n\nNot requested."
+                    )
+
+                sections.append(
+                    "Findings require human review. "
+                    "Submitted code was not executed."
                 )
 
-                json_report = json.dumps(
-                    {
-                        "metadata": metadata,
-                        "review": report.model_dump(),
-                    },
-                    indent=2,
-                    ensure_ascii=False,
-                )
-
-                st.write(
+                st.caption(
                     "Exports include all findings, "
-                    "regardless of the selected filters."
+                    "regardless of active filters."
                 )
 
                 st.download_button(
                     "Download Markdown report",
-                    data=markdown_report,
+                    data="\n\n".join(sections),
                     file_name="codelens_review.md",
                     mime="text/markdown",
                     use_container_width=True,
@@ -671,19 +795,20 @@ with review_column:
 
                 st.download_button(
                     "Download JSON report",
-                    data=json_report,
+                    data=json.dumps(
+                        payload,
+                        indent=2,
+                        ensure_ascii=False,
+                    ),
                     file_name="codelens_review.json",
                     mime="application/json",
                     use_container_width=True,
                 )
 
 
-# --------------------------------------------------
-# FOOTER
-# --------------------------------------------------
 st.divider()
 st.caption(
     f"Source: {file_name} · "
     f"{len(source_code.splitlines())} lines · "
-    "AI findings and proposed fixes require human review."
+    "Local rules and AI analysis provide complementary findings."
 )
