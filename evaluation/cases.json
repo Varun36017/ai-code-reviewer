@@ -1,0 +1,26 @@
+[
+  {
+    "id": "empty_average",
+    "description": "An average function that crashes on an empty list.",
+    "code": "def calculate_average(numbers):\n    return sum(numbers) / len(numbers)\n",
+    "expected_finding": "An empty list causes division by zero.",
+    "expected_line": 2,
+    "review_context": "This function should reject empty lists with a descriptive ValueError."
+  },
+  {
+    "id": "unsafe_eval",
+    "description": "A calculator that evaluates untrusted user input.",
+    "code": "def calculate(user_input):\n    return eval(user_input)\n",
+    "expected_finding": "Using eval on untrusted input can execute arbitrary Python code.",
+    "expected_line": 2,
+    "review_context": "The input comes from an untrusted user."
+  },
+  {
+    "id": "correct_average",
+    "description": "An average function that handles empty lists explicitly.",
+    "code": "def calculate_average(numbers: list[float]) -> float:\n    \"\"\"Return the mean of a nonempty list of numbers.\"\"\"\n    if not numbers:\n        raise ValueError(\"numbers must not be empty\")\n    return sum(numbers) / len(numbers)\n",
+    "expected_finding": null,
+    "expected_line": null,
+    "review_context": "Inputs are lists of ordinary finite numbers. Empty lists should raise ValueError. No known defect is intentionally included."
+  }
+]
