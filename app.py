@@ -1,3 +1,4 @@
+import difflib
 import hashlib
 import json
 import time
@@ -803,6 +804,124 @@ with review_column:
                 )
 
 
+# --------------------------------------------------
+# FULL-WIDTH CODE COMPARISON
+# --------------------------------------------------
+if report is not None:
+    st.divider()
+    st.subheader("03 · Compare proposed changes")
+    st.caption(
+        "Compare original source evidence with an AI-proposed snippet. "
+        "The snippet may cover a different scope from the evidence range. "
+        "It is not an automatic replacement or a verified patch."
+    )
+
+    proposals = [
+        (index, finding)
+        for index, finding in enumerate(report.findings, start=1)
+        if finding.corrected_code.strip()
+    ]
+
+    if not proposals:
+        st.info(
+            "This review contains no proposed code snippets to compare."
+        )
+
+    else:
+        proposal_labels = {
+            index: f"Finding {index}: {finding.title}"
+            for index, finding in proposals
+        }
+
+        selected_index = st.selectbox(
+            "Choose a proposed change",
+            options=list(proposal_labels),
+            format_func=lambda index: proposal_labels[index],
+            key=f"comparison_{source_hash}_{model_name}",
+        )
+
+        selected_finding = next(
+            finding
+            for index, finding in proposals
+            if index == selected_index
+        )
+
+        original_snippet = "\n".join(
+            source_code.splitlines()[
+                selected_finding.line_start - 1:
+                selected_finding.line_end
+            ]
+        )
+
+        proposed_snippet = selected_finding.corrected_code
+
+        original_column, proposed_column = st.columns(
+            2,
+            gap="large",
+        )
+
+        with original_column:
+            st.markdown("**Original source evidence**")
+            st.caption(
+                f"Original file lines {selected_finding.line_start}"
+                f"–{selected_finding.line_end}"
+            )
+            st.code(original_snippet, language="python")
+
+        with proposed_column:
+            st.markdown("**AI-proposed snippet**")
+            st.caption(
+                "Not executed or verified. Review before using."
+            )
+            st.code(proposed_snippet, language="python")
+
+        st.markdown("**Suggested improvement**")
+        st.write(selected_finding.suggested_fix)
+
+        with st.expander("Show text differences"):
+            st.caption(
+                "Minus lines are original evidence; plus lines are "
+                "proposed text. Diff line numbers are relative to these "
+                "snippets, not the original file. Different snippet "
+                "scopes can produce misleading differences; this is "
+                "not an apply-ready patch."
+            )
+
+            difference = "\n".join(
+                difflib.unified_diff(
+                    original_snippet.splitlines(),
+                    proposed_snippet.splitlines(),
+                    fromfile="original_evidence",
+                    tofile="ai_proposed_snippet",
+                    lineterm="",
+                )
+            )
+
+            if difference:
+                st.code(difference, language="diff")
+            else:
+                st.info("The two snippets have identical lines.")
+
+        st.download_button(
+            "Download proposed snippet (.py)",
+            data=proposed_snippet,
+            file_name=(
+                f"codelens_finding_{selected_index}_proposal.py"
+            ),
+            mime="text/plain",
+            key="download_comparison_proposal",
+        )
+
+        st.caption(
+            "The download contains only this proposed snippet, "
+            "not a corrected copy of your entire file. "
+            "Selecting a finding makes no new Gemini request."
+        )
+
+
+# --------------------------------------------------
+# FOOTER
+# --------------------------------------------------
 st.divider()
 st.caption(
     f"Source: {file_name} · "
