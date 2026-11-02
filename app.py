@@ -287,24 +287,26 @@ with st.sidebar:
     )
 
     st.divider()
-    st.subheader("Review settings")
 
-    model_name = st.text_input(
-        "Gemini model ID",
-        value="gemini-flash-latest",
-    ).strip()
+    # Collapsed by default. Click the heading to open or close it.
+    with st.expander("Review settings", expanded=False):
+        model_name = st.text_input(
+            "Gemini model ID",
+            value="gemini-flash-latest",
+        ).strip()
 
-    if configuration_error:
-        st.error("Check the format of your secrets file.")
-    elif api_key:
-        st.success("Saved API key loaded")
-    else:
-        st.warning("API key missing")
+        if configuration_error:
+            st.error("Check the format of your secrets file.")
+        elif api_key:
+            st.success("Saved API key loaded")
+        else:
+            st.warning("API key missing")
 
-    st.caption("Ruff and Bandit work without an API key.")
+        st.caption("Ruff and Bandit work without an API key.")
 
     st.divider()
     st.subheader("Review engines")
+
     st.markdown(
         """
         - **Python:** syntax checking
