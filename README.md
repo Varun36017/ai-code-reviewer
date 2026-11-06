@@ -1,5 +1,7 @@
 # CodeLens — Python Code Reviewer
 
+**[Open CodeLens — Live Demo](https://ai-code-reviewer-it6qzjcopz3bedfrarscuk.streamlit.app/)**
+
 [![CodeLens tests](https://github.com/Varun36017/ai-code-reviewer/actions/workflows/tests.yml/badge.svg)](https://github.com/Varun36017/ai-code-reviewer/actions/workflows/tests.yml)
 
 CodeLens combines local Python checks with Gemini-assisted code reviews
